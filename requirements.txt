@@ -1,0 +1,18 @@
+# Core
+numpy
+sounddevice
+requests
+python-dotenv
+soundfile
+
+# Phonemes
+g2p_en
+
+# Coqui TTS (VITS / many local models)
+TTS
+
+# VoXtream2 (optional; requires system dependency `espeak-ng`)
+# voxtream>=0.2
+
+# Optional GPU stack is environment-specific; install torch per your CUDA version.
+# torch
