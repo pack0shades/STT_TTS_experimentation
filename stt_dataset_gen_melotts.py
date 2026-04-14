@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
 from typing import Iterable, Optional
+import sys
 
 import numpy as np
 
@@ -258,13 +259,56 @@ class MeloHandle:
     spk2id: dict[str, int]
 
 
+def _ensure_local_melotts_on_sys_path() -> list[str]:
+    """Best-effort: add local MeloTTS repo to sys.path.
+
+    This repo often vendors MeloTTS as a subfolder (./MeloTTS). If it is not
+    installed into the venv as a package, imports like `from melo.api import TTS`
+    will fail unless we add that folder to sys.path.
+
+    Returns a list of candidate paths that were checked/added (for diagnostics).
+    """
+
+    checked: list[str] = []
+
+    here = Path(__file__).resolve().parent
+    candidates = [
+        here / "MeloTTS",
+        here.parent / "MeloTTS",
+    ]
+
+    for c in candidates:
+        checked.append(str(c))
+        if (c / "melo" / "api.py").exists():
+            if str(c) not in sys.path:
+                sys.path.insert(0, str(c))
+            break
+
+    return checked
+
+
 def _load_melotts(*, use_gpu: bool, language: str) -> MeloHandle:
     try:
         from melo.api import TTS  # type: ignore
     except Exception as e:
-        raise RuntimeError(
-            "MeloTTS not importable. Install the MeloTTS repo/package so `from melo.api import TTS` works."
-        ) from e
+        checked = _ensure_local_melotts_on_sys_path()
+        # If the first import attempt partially initialized the module, Python may
+        # cache the failure. Clear it before retrying.
+        for k in ("melo", "melo.api"):
+            try:
+                sys.modules.pop(k, None)
+            except Exception:
+                pass
+        try:
+            from melo.api import TTS  # type: ignore
+        except Exception:
+            raise RuntimeError(
+                "MeloTTS not importable. Either install it into the venv (e.g. pip install -e ./MeloTTS) "
+                "or keep a local copy at ./MeloTTS so this script can auto-detect it. "
+                f"Checked: {checked}."
+            ) from e
+
+    # (TTS is now importable)
 
     device = "cuda" if use_gpu else "cpu"
     t0 = perf_counter()
