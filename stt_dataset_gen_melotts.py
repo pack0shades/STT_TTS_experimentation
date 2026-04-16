@@ -315,11 +315,14 @@ def _load_melotts(*, use_gpu: bool, language: str) -> MeloHandle:
     tts = TTS(language=str(language), device=device)
     init_s = perf_counter() - t0
 
-    spk2id = {}
+    spk2id: dict[str, int] = {}
     try:
         raw = getattr(getattr(getattr(tts, "hps"), "data"), "spk2id", None)
         if isinstance(raw, dict):
             spk2id = {str(k): int(v) for k, v in raw.items()}
+        elif raw is not None and hasattr(raw, "items"):
+            # MeloTTS stores nested JSON dicts as `HParams`, which isn't a `dict` but exposes `.items()`.
+            spk2id = {str(k): int(v) for k, v in list(raw.items())}
     except Exception:
         spk2id = {}
 
@@ -391,6 +394,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--cpu", action="store_true")
 
     p.add_argument("--speaker", type=str, default="", help="Speaker name (if model provides spk2id)")
+    p.add_argument(
+        "--speakers",
+        type=str,
+        default="",
+        help="Comma-separated list of speaker names to sample from (requires spk2id)",
+    )
+    p.add_argument("--all-speakers", action="store_true", help="Use all speakers from spk2id (multi-speaker models only)")
+    p.add_argument(
+        "--speaker-mix",
+        type=str,
+        default="random",
+        choices=["random", "roundrobin"],
+        help="How to choose speakers when multiple are provided",
+    )
     p.add_argument("--speaker-id", type=int, default=-1)
     p.add_argument("--random-speaker", action="store_true", help="Randomize speaker if spk2id available")
 
@@ -458,6 +475,25 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     handle = _load_melotts(use_gpu=use_gpu, language=str(args.language))
 
+    def _parse_csv_list(s: str) -> list[str]:
+        parts = [p.strip() for p in str(s).split(",")]
+        return [p for p in parts if p]
+
+    id2spk = {int(v): str(k) for k, v in handle.spk2id.items()} if handle.spk2id else {}
+
+    speaker_pool: list[str] = []
+    if str(args.speakers).strip():
+        if not handle.spk2id:
+            raise RuntimeError("--speakers was provided but this MeloTTS model does not expose spk2id (single-speaker model)")
+        speaker_pool = _parse_csv_list(str(args.speakers))
+        unknown = [s for s in speaker_pool if s not in handle.spk2id]
+        if unknown:
+            raise RuntimeError(f"Unknown speakers in --speakers: {unknown}. Available: {sorted(handle.spk2id.keys())[:50]}")
+    elif bool(args.all_speakers):
+        if not handle.spk2id:
+            raise RuntimeError("--all-speakers was set but this MeloTTS model does not expose spk2id (single-speaker model)")
+        speaker_pool = sorted(handle.spk2id.keys())
+
     # Decide speed/gain ranges
     speed_min = float(args.speed_min) if float(args.speed_min) > 0 else 0.0
     speed_max = float(args.speed_max) if float(args.speed_max) > 0 else 0.0
@@ -500,13 +536,26 @@ def main(argv: Optional[list[str]] = None) -> int:
         for i, text in enumerate(prompts):
             sample_id = f"{i:06d}"
 
-            spk_id = _pick_speaker_id(
-                spk2id=handle.spk2id,
-                speaker=str(args.speaker),
-                speaker_id=int(args.speaker_id),
-                rng=rng,
-                random_speaker=bool(args.random_speaker),
-            )
+            if int(args.speaker_id) >= 0:
+                spk_id = int(args.speaker_id)
+                speaker_name = id2spk.get(int(spk_id), "")
+            elif speaker_pool:
+                if len(speaker_pool) == 1:
+                    speaker_name = speaker_pool[0]
+                elif str(args.speaker_mix) == "roundrobin":
+                    speaker_name = speaker_pool[int(i % len(speaker_pool))]
+                else:
+                    speaker_name = speaker_pool[int(rng.randrange(0, len(speaker_pool)))]
+                spk_id = int(handle.spk2id[str(speaker_name)])
+            else:
+                spk_id = _pick_speaker_id(
+                    spk2id=handle.spk2id,
+                    speaker=str(args.speaker),
+                    speaker_id=int(args.speaker_id),
+                    rng=rng,
+                    random_speaker=bool(args.random_speaker),
+                )
+                speaker_name = id2spk.get(int(spk_id), str(args.speaker) if str(args.speaker) else "")
 
             if use_speed_range:
                 speed = rng.uniform(speed_min, speed_max)
@@ -547,6 +596,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     "text": text,
                     "language": str(args.language),
                     "speaker_id": int(spk_id),
+                    "speaker_name": str(speaker_name),
                     "speed": round(float(speed), 4),
                     "sr": int(args.sr),
                     "duration_s": round(duration_s, 4),

@@ -25,8 +25,6 @@ from pathlib import Path
 from time import perf_counter
 from typing import Iterable, Optional
 
-import numpy as np
-
 import tts_common as common
 from stt_dataset_gen_melotts import (
     _add_white_noise_snr,
@@ -36,7 +34,17 @@ from stt_dataset_gen_melotts import (
     _resample_linear,
     _simulate_telephony,
 )
-from tts_vibevoice import DEFAULT_MODEL_PATH, _load_vibevoice, synthesize_vibevoice
+from tts_vibevoice import (
+    DEFAULT_MODEL_PATH,
+    DEFAULT_SR,
+    VibeVoiceHandle,
+    _default_voices_dirs,
+    _import_vibevoice,
+    _load_dtype_and_attention,
+    _pick_device,
+    _resolve_voice_preset,
+    synthesize_vibevoice,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -77,6 +85,23 @@ def _iter_prompts(path: str) -> list[str]:
     return list(_iter_prompts_txt(path))
 
 
+def _parse_csv_list(s: str) -> list[str]:
+    parts = [p.strip() for p in str(s).split(",")]
+    return [p for p in parts if p]
+
+
+def _list_available_voice_presets(*, voices_dir: str, vibevoice_repo: str) -> list[str]:
+    # Return preset stems (file name without extension) to feed into --speaker-name matching.
+    dirs = [Path(voices_dir).expanduser()] if voices_dir else _default_voices_dirs(vibevoice_repo)
+    names: set[str] = set()
+    for d in dirs:
+        if not d.exists():
+            continue
+        for pt in d.glob("*.pt"):
+            names.add(pt.stem)
+    return sorted(names)
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     common.setup_logging()
 
@@ -88,6 +113,24 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--model-path", type=str, default=DEFAULT_MODEL_PATH)
     p.add_argument("--vibevoice-repo", type=str, default="")
     p.add_argument("--speaker-name", type=str, default="Emma")
+    p.add_argument(
+        "--speaker-names",
+        type=str,
+        default="",
+        help="Comma-separated list of speakers/presets to sample from (overrides --speaker-name)",
+    )
+    p.add_argument(
+        "--all-speakers",
+        action="store_true",
+        help="Use all available VibeVoice streaming voice presets found via --voices-dir or the VibeVoice repo",
+    )
+    p.add_argument(
+        "--speaker-mix",
+        type=str,
+        default="random",
+        choices=["random", "roundrobin"],
+        help="How to choose speakers when multiple are provided",
+    )
     p.add_argument("--voice-preset", type=str, default="", help="Path to a VibeVoice streaming .pt voice preset")
     p.add_argument("--voices-dir", type=str, default="", help="Directory containing streaming_model .pt voice presets")
     p.add_argument("--cfg-scale", type=float, default=1.5)
@@ -169,16 +212,90 @@ def main(argv: Optional[list[str]] = None) -> int:
     if int(args.n) > 0:
         prompts = prompts[: int(args.n)]
 
-    handle, init_s = _load_vibevoice(
-        use_gpu=use_gpu,
-        model_path=str(args.model_path),
-        speaker_name=str(args.speaker_name),
-        voice_preset=str(args.voice_preset),
-        voices_dir=str(args.voices_dir),
-        vibevoice_repo=str(args.vibevoice_repo),
-        ddpm_steps=int(args.ddpm_steps),
+    # Speaker pool
+    speaker_pool: list[str]
+    if str(args.voice_preset) and (str(args.speaker_names).strip() or bool(args.all_speakers)):
+        raise RuntimeError("--voice-preset cannot be combined with --speaker-names/--all-speakers")
+
+    if str(args.speaker_names).strip():
+        speaker_pool = _parse_csv_list(str(args.speaker_names))
+    elif bool(args.all_speakers):
+        speaker_pool = _list_available_voice_presets(voices_dir=str(args.voices_dir), vibevoice_repo=str(args.vibevoice_repo))
+        if not speaker_pool:
+            raise RuntimeError(
+                "--all-speakers was set but no VibeVoice streaming .pt presets were found. "
+                "Pass --voices-dir pointing at VibeVoice/demo/voices/streaming_model."
+            )
+    else:
+        speaker_pool = [str(args.speaker_name)]
+
+    # Load VibeVoice model once, then load voice prefill presets for each speaker.
+    import torch
+
+    processor_cls, model_cls = _import_vibevoice(str(args.vibevoice_repo))
+
+    device = _pick_device(use_gpu=use_gpu)
+    if device == "cuda" and not torch.cuda.is_available():
+        logger.warning("CUDA requested but unavailable; falling back to CPU")
+        device = "cpu"
+
+    load_dtype, attn_impl = _load_dtype_and_attention(device)
+
+    t0 = perf_counter()
+    processor = processor_cls.from_pretrained(str(args.model_path))
+    try:
+        model = model_cls.from_pretrained(
+            str(args.model_path),
+            torch_dtype=load_dtype,
+            device_map=device,
+            attn_implementation=attn_impl,
+        )
+    except Exception:
+        if attn_impl != "flash_attention_2":
+            raise
+        logger.warning("flash_attention_2 load failed; retrying VibeVoice with sdpa attention")
+        model = model_cls.from_pretrained(
+            str(args.model_path),
+            torch_dtype=load_dtype,
+            device_map=device,
+            attn_implementation="sdpa",
+        )
+    model.eval()
+    if hasattr(model, "set_ddpm_inference_steps"):
+        model.set_ddpm_inference_steps(num_steps=int(args.ddpm_steps))
+
+    voice_prefills: dict[str, object] = {}
+    for spk in speaker_pool:
+        preset_path = _resolve_voice_preset(
+            speaker_name=str(spk),
+            voice_preset=str(args.voice_preset),
+            voices_dir=str(args.voices_dir),
+            vibevoice_repo=str(args.vibevoice_repo),
+        )
+        voice_prefills[str(spk)] = torch.load(str(preset_path), map_location=device, weights_only=False)
+
+    handles: dict[str, VibeVoiceHandle] = {
+        str(spk): VibeVoiceHandle(
+            processor=processor,
+            model=model,
+            voice_prefill=voice_prefills[str(spk)],
+            sr=DEFAULT_SR,
+            device=device,
+            speaker_name=str(spk),
+        )
+        for spk in speaker_pool
+    }
+
+    init_s = perf_counter() - t0
+    common.log_json(
+        logger,
+        {
+            "event": "vibevoice_dataset_ready",
+            "init_s": round(float(init_s), 3),
+            "device": str(device),
+            "speakers": list(speaker_pool),
+        },
     )
-    common.log_json(logger, {"event": "vibevoice_dataset_ready", "init_s": round(float(init_s), 3)})
 
     gain_min = float(args.gain_db_min)
     gain_max = float(args.gain_db_max)
@@ -217,8 +334,15 @@ def main(argv: Optional[list[str]] = None) -> int:
             sample_id = f"{i:06d}"
 
             try:
+                if len(speaker_pool) == 1:
+                    speaker_name = speaker_pool[0]
+                elif str(args.speaker_mix) == "roundrobin":
+                    speaker_name = speaker_pool[int(i % len(speaker_pool))]
+                else:
+                    speaker_name = speaker_pool[int(rng.randrange(0, len(speaker_pool)))]
+
                 audio, model_sr, gen_s = synthesize_vibevoice(
-                    handle=handle,
+                    handle=handles[str(speaker_name)],
                     text=text,
                     cfg_scale=float(args.cfg_scale),
                 )
@@ -252,7 +376,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     "language": str(args.language),
                     "model": "vibevoice-realtime-0.5b",
                     "model_path": str(args.model_path),
-                    "speaker_name": str(args.speaker_name),
+                    "speaker_name": str(speaker_name),
                     "cfg_scale": float(args.cfg_scale),
                     "ddpm_steps": int(args.ddpm_steps),
                     "sr": int(args.sr),

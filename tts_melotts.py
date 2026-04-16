@@ -30,13 +30,20 @@ def _pick_speaker_id(tts_obj, speaker: str, speaker_id: int) -> int:
         return int(speaker_id)
 
     # Try mapping if provided by MeloTTS
-    spk2id = None
+    spk2id_raw = None
     try:
-        spk2id = getattr(getattr(getattr(tts_obj, "hps"), "data"), "spk2id", None)
+        spk2id_raw = getattr(getattr(getattr(tts_obj, "hps"), "data"), "spk2id", None)
     except Exception:
-        spk2id = None
+        spk2id_raw = None
 
-    if isinstance(spk2id, dict) and spk2id:
+    spk2id: dict[str, int] = {}
+    if isinstance(spk2id_raw, dict):
+        spk2id = {str(k): int(v) for k, v in spk2id_raw.items()}
+    elif spk2id_raw is not None and hasattr(spk2id_raw, "items"):
+        # MeloTTS stores nested JSON dicts as `HParams`, which isn't a `dict` but exposes `.items()`.
+        spk2id = {str(k): int(v) for k, v in list(spk2id_raw.items())}
+
+    if spk2id:
         if speaker:
             if speaker in spk2id:
                 return int(spk2id[speaker])
