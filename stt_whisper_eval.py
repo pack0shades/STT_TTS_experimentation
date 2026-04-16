@@ -6,15 +6,15 @@ Expected JSONL format:
 Example:
   /home/pragay/WWAI/.venv/bin/python stt_whisper_eval.py \
     --data-jsonl datasets/sales_synth_melotts/train.jsonl \
-    --model openai/whisper-small \
+    --model openai/whisper-large-v3 \
     --language en --task transcribe \
     --max-samples 50
 
 With LoRA adapter saved by stt_whisper_lora_finetune.py:
   /home/pragay/WWAI/.venv/bin/python stt_whisper_eval.py \
     --data-jsonl datasets/sales_synth_melotts/train.jsonl \
-    --model openai/whisper-small \
-    --adapter-dir outputs/whisper-small-lora-quick \
+    --model openai/whisper-large-v3 \
+    --adapter-dir outputs/whisper-large-v3-lora-quick \
     --language en --task transcribe \
     --max-samples 200
 """
@@ -53,14 +53,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--data-jsonl", type=str, required=True)
     p.add_argument("--audio-root", type=str, default=".")
 
-    p.add_argument("--model", type=str, default="openai/whisper-small")
+    p.add_argument("--model", type=str, default="openai/whisper-large-v3")
     p.add_argument("--adapter-dir", type=str, default="", help="Optional PEFT adapter dir")
 
     p.add_argument("--language", type=str, default="en")
     p.add_argument("--task", type=str, default="transcribe", choices=["transcribe", "translate"])
 
     p.add_argument("--max-samples", type=int, default=0)
-    p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument("--batch-size", type=int, default=2)
 
     p.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
     p.add_argument("--fp16", action="store_true")

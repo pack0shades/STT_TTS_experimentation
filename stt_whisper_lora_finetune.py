@@ -13,12 +13,12 @@ Example quick check:
   /home/pragay/WWAI/.venv/bin/python stt_whisper_lora_finetune.py \
     --train-jsonl datasets/sales_synth_melotts/train.jsonl \
     --eval-jsonl datasets/sales_synth_melotts/val.jsonl \
-    --model openai/whisper-small \
+    --model openai/whisper-large-v3 \
     --language en --task transcribe \
-    --output-dir outputs/whisper-small-lora-quick \
+    --output-dir outputs/whisper-large-v3-lora-quick \
     --max-train-samples 200 --max-eval-samples 50 \
     --num-train-epochs 1 \
-    --per-device-train-batch-size 8 --gradient-accumulation-steps 2 \
+    --per-device-train-batch-size 1 --gradient-accumulation-steps 8 \
     --learning-rate 1e-4 \
     --fp16
 
@@ -88,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--eval-jsonl", type=str, default="")
     p.add_argument("--audio-root", type=str, default=".", help="Prefix for relative audio paths")
 
-    p.add_argument("--model", type=str, default="openai/whisper-small")
+    p.add_argument("--model", type=str, default="openai/whisper-large-v3")
     p.add_argument("--language", type=str, default="en")
     p.add_argument("--task", type=str, default="transcribe", choices=["transcribe", "translate"])
 
@@ -97,6 +97,12 @@ def main(argv: list[str] | None = None) -> int:
     # Quick-iteration knobs
     p.add_argument("--max-train-samples", type=int, default=200, help="0 means no limit")
     p.add_argument("--max-eval-samples", type=int, default=50, help="0 means no limit")
+    p.add_argument(
+        "--val-ratio",
+        type=float,
+        default=0.05,
+        help="If eval-jsonl is not provided or empty, create an eval split from train with this ratio (0 disables).",
+    )
 
     # Training hyperparams
     p.add_argument("--num-train-epochs", type=float, default=1.0)
@@ -104,9 +110,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--warmup-steps", type=int, default=50)
     p.add_argument("--weight-decay", type=float, default=0.0)
 
-    p.add_argument("--per-device-train-batch-size", type=int, default=8)
-    p.add_argument("--per-device-eval-batch-size", type=int, default=8)
-    p.add_argument("--gradient-accumulation-steps", type=int, default=2)
+    # Defaults tuned for whisper-large-v3 to reduce OOM risk.
+    p.add_argument("--per-device-train-batch-size", type=int, default=1)
+    p.add_argument("--per-device-eval-batch-size", type=int, default=1)
+    p.add_argument("--gradient-accumulation-steps", type=int, default=8)
 
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--fp16", action="store_true")
@@ -233,6 +240,11 @@ def main(argv: list[str] | None = None) -> int:
 
     remove_cols = [c for c in ds["train"].column_names if c not in ("audio", "text")]
     ds = ds.map(_prepare, remove_columns=remove_cols)
+
+    # If eval wasn't provided (or was empty), create a held-out eval split from the synthetic train set.
+    if "eval" not in ds and float(args.val_ratio) > 0.0:
+        split = ds["train"].train_test_split(test_size=float(args.val_ratio), seed=int(args.seed))
+        ds = {"train": split["train"], "eval": split["test"]}
 
     # Optional subsampling
     if int(args.max_train_samples) > 0 and len(ds["train"]) > int(args.max_train_samples):
