@@ -30,6 +30,7 @@ MODEL_TO_SCRIPT = {
     "deepgram": "tts_deepgram_aura2.py",
     "cartesia": "tts_cartesia_sonic3.py",
     "voxtream": "tts_voxtream.py",
+    "vibevoice": "tts_vibevoice.py",
     "fishspeech": "tts_fishspeech_15.py",
     "cosyvoice2": "tts_cosyvoice2.py",
     "omnitalker": "tts_omnitalker.py",
@@ -71,7 +72,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             cmd.extend(["--prompt-audio", args.voxtream_prompt_audio])
 
         # Propagate device choice only to runners that understand it (local ones).
-        local_runner = m in {"vits", "melotts", "voxtream"}
+        local_runner = m in {"vits", "melotts", "voxtream", "vibevoice"}
         if local_runner:
             if args.cpu:
                 cmd.append("--cpu")
@@ -82,7 +83,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 if common.gpu_is_available():
                     cmd.append("--gpu")
 
-            if args.stream_local:
+            if args.stream_local and m in {"melotts", "voxtream"}:
                 cmd.append("--stream")
 
         if args.no_play:

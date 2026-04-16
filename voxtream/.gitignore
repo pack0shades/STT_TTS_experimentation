@@ -1,0 +1,10 @@
+.vscode/
+__pycache__/
+*.pyc
+assets/audio/*.npy
+assets/benchmark/*.npy
+experiments/
+dist/
+*.egg-info/
+gradio_cached_examples/
+wavlm-large/
