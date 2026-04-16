@@ -62,10 +62,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--task", type=str, default="transcribe", choices=["transcribe", "translate"])
 
     p.add_argument("--max-samples", type=int, default=0)
-    p.add_argument("--batch-size", type=int, default=2)
+    p.add_argument("--batch-size", type=int, default=8)
 
     p.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
     p.add_argument("--fp16", action="store_true")
+    p.add_argument("--bf16", action="store_true")
 
     p.add_argument("--generation-max-length", type=int, default=225)
     p.add_argument("--save-preds", type=str, default="", help="Optional JSONL output with predictions")
@@ -140,7 +141,10 @@ def main(argv: list[str] | None = None) -> int:
     model.to(device)
     model.eval()
 
-    use_amp = bool(args.fp16) and device == "cuda"
+    # Default to BF16 on CUDA unless you explicitly ask for FP16.
+    use_bf16 = bool(args.bf16) or (device == "cuda" and not bool(args.fp16))
+    use_fp16 = bool(args.fp16) and not use_bf16
+    use_amp = (use_fp16 or use_bf16) and device == "cuda"
 
     preds: list[str] = []
     refs: list[str] = []
@@ -162,8 +166,9 @@ def main(argv: list[str] | None = None) -> int:
             input_features = inputs.input_features.to(device)
 
             with torch.no_grad():
+                dtype = torch.bfloat16 if use_bf16 else torch.float16
                 ctx = (
-                    torch.autocast(device_type="cuda", dtype=torch.float16)
+                    torch.autocast(device_type="cuda", dtype=dtype)
                     if use_amp
                     else contextlib.nullcontext()
                 )

@@ -18,9 +18,9 @@ Example quick check:
     --output-dir outputs/whisper-large-v3-lora-quick \
     --max-train-samples 200 --max-eval-samples 50 \
     --num-train-epochs 1 \
-    --per-device-train-batch-size 1 --gradient-accumulation-steps 8 \
+    --per-device-train-batch-size 8 --gradient-accumulation-steps 2 \
     --learning-rate 1e-4 \
-    --fp16
+    --bf16
 
 Dependencies (install into your venv):
   uv pip install -U transformers datasets accelerate peft evaluate jiwer \
@@ -110,10 +110,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--warmup-steps", type=int, default=50)
     p.add_argument("--weight-decay", type=float, default=0.0)
 
-    # Defaults tuned for whisper-large-v3 to reduce OOM risk.
-    p.add_argument("--per-device-train-batch-size", type=int, default=1)
-    p.add_argument("--per-device-eval-batch-size", type=int, default=1)
-    p.add_argument("--gradient-accumulation-steps", type=int, default=8)
+    # H100-friendly defaults (you can still override).
+    p.add_argument("--per-device-train-batch-size", type=int, default=8)
+    p.add_argument("--per-device-eval-batch-size", type=int, default=8)
+    p.add_argument("--gradient-accumulation-steps", type=int, default=2)
 
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--fp16", action="store_true")
@@ -143,6 +143,9 @@ def main(argv: list[str] | None = None) -> int:
         import torch
 
         has_cuda = bool(torch.cuda.is_available())
+        if has_cuda:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
     except Exception:
         _require("torch", "Install torch for your CUDA/CPU setup")
 
@@ -198,6 +201,7 @@ def main(argv: list[str] | None = None) -> int:
     # Load processor/model
     processor = WhisperProcessor.from_pretrained(args.model)
     model = WhisperForConditionalGeneration.from_pretrained(args.model)
+    model.config.use_cache = False
 
     # Prompt the decoder for the target language/task
     if hasattr(processor.tokenizer, "set_prefix_tokens"):
@@ -272,6 +276,10 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Precision: default to BF16 on CUDA (ideal for H100) unless you explicitly ask for FP16.
+    use_bf16 = bool(args.bf16) or (has_cuda and not bool(args.fp16))
+    use_fp16 = bool(args.fp16) and not use_bf16
+
     ta_kwargs: dict[str, Any] = {
         "output_dir": str(out_dir),
         "per_device_train_batch_size": int(args.per_device_train_batch_size),
@@ -281,8 +289,9 @@ def main(argv: list[str] | None = None) -> int:
         "warmup_steps": int(args.warmup_steps),
         "weight_decay": float(args.weight_decay),
         "num_train_epochs": float(args.num_train_epochs),
-        "fp16": bool(args.fp16),
-        "bf16": bool(args.bf16),
+        "fp16": bool(use_fp16),
+        "bf16": bool(use_bf16),
+        "tf32": bool(has_cuda),
         "logging_steps": int(args.logging_steps),
         "save_steps": int(args.save_steps),
         "save_total_limit": 2,
