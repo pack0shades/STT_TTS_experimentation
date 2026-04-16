@@ -1,3 +1,5 @@
+# pyright: reportMissingImports=false, reportGeneralTypeIssues=false, reportAttributeAccessIssue=false
+
 """Evaluate Whisper (optionally with a LoRA adapter) on a JSONL dataset.
 
 Expected JSONL format:
